@@ -1,0 +1,325 @@
+<!doctype html>
+<!-- Declares this document as HTML5 -->
+<html lang="en">
+<head>
+  <!-- Character encoding so symbols render correctly -->
+  <meta charset="utf-8" />
+
+  <!-- Makes the layout responsive on phones/tablets -->
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#111111">
+
+  <!-- iOS (basic support) -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+
+  <title>Podcast Timestamp Logger</title>
+
+  <style>
+    /* Basic page styling */
+    body {
+      font-family: system-ui, Arial, sans-serif;
+      max-width: 720px;
+      margin: 32px auto;
+      padding: 0 16px;
+    }
+
+    /* Large timer display */
+    .time {
+      font-size: 48px;
+      font-variant-numeric: tabular-nums; /* keeps numbers aligned */
+      margin: 16px 0;
+    }
+
+    /* Button styling */
+    button {
+      padding: 12px 16px;
+      margin-right: 8px;
+      margin-bottom: 8px;
+      font-size: 16px;
+    }
+
+    /* Marks list spacing */
+    ul {
+      padding-left: 18px;
+    }
+
+    li {
+      margin: 6px 0;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Button row layout */
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .muted {
+      color: #666;
+      font-size: 14px;
+    }
+
+    /* Export text area */
+    textarea {
+      width: 100%;
+      height: 120px;
+      margin-top: 10px;
+      font-family: ui-monospace, monospace;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Podcast Timestamp Logger</h1>
+
+  <!-- Timer display -->
+  <div class="time" id="display">00:00.000</div>
+
+  <!-- Control buttons -->
+  <div class="row">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="markBtn" disabled>Mark</button>
+    <button id="resetBtn">Reset</button>
+  </div>
+
+  <p class="muted">
+    Keyboard shortcuts: <b>Space</b> = start/stop, <b>M</b> = mark
+  </p>
+
+  <h3>Marks</h3>
+  <ul id="marks"></ul>
+
+  <!-- Export buttons -->
+  <div class="row">
+    <button id="copyBtn">Copy</button>
+    <button id="csvBtn">Download CSV</button>
+    <button id="txtBtn">Download TXT</button>
+  </div>
+
+  <!-- Text area showing exportable timestamps -->
+  <textarea id="exportBox" readonly></textarea>
+
+  <script>
+    /***********************
+     * DOM ELEMENT LOOKUPS *
+     ***********************/
+
+    // Timer display
+    const display = document.getElementById("display");
+
+    // List where marks appear
+    const marksList = document.getElementById("marks");
+
+    // Text area for exporting
+    const exportBox = document.getElementById("exportBox");
+
+    // Buttons
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const markBtn = document.getElementById("markBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const copyBtn = document.getElementById("copyBtn");
+    const csvBtn = document.getElementById("csvBtn");
+    const txtBtn = document.getElementById("txtBtn");
+
+    /***********************
+     * APP STATE VARIABLES *
+     ***********************/
+
+    // Is the timer currently running?
+    let running = false;
+
+    // Timestamp when the timer was last started
+    let startPerf = 0;
+
+    // Total elapsed time when paused (milliseconds)
+    let elapsedMs = 0;
+
+    // requestAnimationFrame ID so we can stop it
+    let rafId = null;
+
+    // Array to store all marks
+    const marks = [];
+
+    /***********************
+     * UTILITY FUNCTIONS   *
+     ***********************/
+
+    // Pads numbers with leading zeros (e.g., 3 -> "03")
+    function pad(num, width = 2) {
+      return String(num).padStart(width, "0");
+    }
+
+    // Converts milliseconds into MM:SS.mmm format
+    function formatMs(ms) {
+      const total = Math.floor(ms);
+      const minutes = Math.floor(total / 60000);
+      const seconds = Math.floor((total % 60000) / 1000);
+      const millis = total % 1000;
+
+      return `${pad(minutes)}:${pad(seconds)}.${pad(millis, 3)}`;
+    }
+
+    // Returns total elapsed time (running or stopped)
+    function currentElapsed() {
+      if (!running) return elapsedMs;
+      return elapsedMs + (performance.now() - startPerf);
+    }
+
+    /***********************
+     * TIMER LOOP          *
+     ***********************/
+
+    // Updates the display every frame (~60fps)
+    function tick() {
+      display.textContent = formatMs(currentElapsed());
+      rafId = requestAnimationFrame(tick);
+    }
+
+    /***********************
+     * MARK HANDLING       *
+     ***********************/
+
+    // Rebuilds the list and export text
+    function renderMarks() {
+      marksList.innerHTML = "";
+
+      marks.forEach(mark => {
+        const li = document.createElement("li");
+        li.textContent = `${mark.n}) ${formatMs(mark.ms)}`;
+        marksList.appendChild(li);
+      });
+
+      // Update export box
+      exportBox.value = marks
+        .map(m => `${m.n}) ${formatMs(m.ms)}`)
+        .join("\n");
+    }
+
+    /***********************
+     * BUTTON ACTIONS      *
+     ***********************/
+
+    function start() {
+      if (running) return;
+
+      running = true;
+      startPerf = performance.now();
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      markBtn.disabled = false;
+
+      tick();
+    }
+
+    function stop() {
+      if (!running) return;
+
+      running = false;
+      elapsedMs = currentElapsed();
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      markBtn.disabled = true;
+
+      cancelAnimationFrame(rafId);
+      display.textContent = formatMs(elapsedMs);
+    }
+
+    function mark() {
+      if (!running) return;
+
+      const ms = currentElapsed();
+      marks.push({
+        n: marks.length + 1,
+        ms
+      });
+
+      renderMarks();
+    }
+
+    function resetAll() {
+      stop();
+      elapsedMs = 0;
+      marks.length = 0;
+      renderMarks();
+      display.textContent = formatMs(0);
+    }
+
+    /***********************
+     * EXPORT FUNCTIONS    *
+     ***********************/
+
+    function download(filename, content, type) {
+      const blob = new Blob([content], { type });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+
+      URL.revokeObjectURL(url);
+    }
+
+    /***********************
+     * EVENT LISTENERS     *
+     ***********************/
+
+    startBtn.addEventListener("click", start);
+    stopBtn.addEventListener("click", stop);
+    markBtn.addEventListener("click", mark);
+    resetBtn.addEventListener("click", resetAll);
+
+    copyBtn.addEventListener("click", () => {
+      navigator.clipboard.writeText(exportBox.value);
+    });
+
+    csvBtn.addEventListener("click", () => {
+      const csv =
+        "index,time_ms,time_formatted\n" +
+        marks.map(m => `${m.n},${Math.round(m.ms)},${formatMs(m.ms)}`).join("\n");
+
+      download("podcast-marks.csv", csv, "text/csv");
+    });
+
+    txtBtn.addEventListener("click", () => {
+      download("podcast-marks.txt", exportBox.value, "text/plain");
+    });
+
+    // Keyboard shortcuts
+    window.addEventListener("keydown", e => {
+      if (e.code === "Space") {
+        e.preventDefault();
+        running ? stop() : start();
+      }
+
+      if (e.key.toLowerCase() === "m") {
+        mark();
+      }
+    });
+  </script>
+
+<script>
+  // Register the Service Worker so the app can work offline + be installable
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", async () => {
+      try {
+        await navigator.serviceWorker.register("./sw.js");
+        // Optional: console.log("Service Worker registered");
+      } catch (err) {
+        console.error("Service Worker registration failed:", err);
+      }
+    });
+  }
+</script>
+</body>
+</html>

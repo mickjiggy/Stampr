@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Podcast Timestamp Logger</title>
+
+  <!-- PWA: Manifest + theme color -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#111111">
+
+  <!-- iOS basics -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+
+  <style>
+    body { font-family: system-ui, Arial; max-width: 780px; margin: 32px auto; padding: 0 16px; }
+    .time { font-size: 52px; font-variant-numeric: tabular-nums; margin: 14px 0; }
+    button, input[type="text"] { padding: 12px 14px; font-size: 16px; }
+    button { cursor: pointer; }
+    .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 10px 0; }
+    .muted { color: #666; font-size: 14px; }
+    ul { padding-left: 18px; }
+    li { margin: 6px 0; font-variant-numeric: tabular-nums; }
+    textarea { width: 100%; height: 140px; margin-top: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .pill { padding: 6px 10px; border: 1px solid #ddd; border-radius: 999px; font-size: 13px; }
+    .split { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    label { display: inline-flex; gap: 8px; align-items: center; }
+  </style>
+</head>
+
+<body>
+  <h1>Podcast Timestamp Logger</h1>
+
+  <!-- Session title controls (Upgrade #2) -->
+  <div class="row">
+    <input id="sessionTitle" type="text" placeholder="Session title (e.g., Ep 12 - Guest Name)" style="flex: 1; min-width: 240px;" />
+    <span class="pill" id="savedStatus">Saved</span>
+  </div>
+
+  <div class="time" id="display">00:00.000</div>
+
+  <!-- Controls -->
+  <div class="row">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="markBtn" disabled>Mark</button>
+    <button id="resetBtn">Reset</button>
+  </div>
+
+  <!-- Lap option (Upgrade #3) -->
+  <div class="row split">
+    <label>
+      <input type="checkbox" id="lapMode" />
+      Lap mode (also logs time since last mark)
+    </label>
+
+    <label>
+      <input type="checkbox" id="askLabel" checked />
+      Ask for label on mark
+    </label>
+
+    <span class="muted">Shortcuts: <b>Space</b> start/stop, <b>M</b> mark</span>
+  </div>
+
+  <h3>Marks</h3>
+  <ul id="marks"></ul>
+
+  <div class="row">
+    <button id="copyBtn">Copy</button>
+    <button id="csvBtn">Download CSV</button>
+    <button id="txtBtn">Download TXT</button>
+    <button id="clearMarksBtn">Clear Marks Only</button>
+  </div>
+
+  <textarea id="exportBox" readonly></textarea>
+
+  <script>
+    /***********************
+     * PERSISTENCE KEYS    *
+     ***********************/
+    const STORAGE_KEY = "podcastTimestampLogger.v1";
+
+    /***********************
+     * DOM REFERENCES      *
+     ***********************/
+    const display = document.getElementById("display");
+    const marksList = document.getElementById("marks");
+    const exportBox = document.getElementById("exportBox");
+
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const markBtn = document.getElementById("markBtn");
+    const resetBtn = document.getElementById("resetBtn");
+
+    const copyBtn = document.getElementById("copyBtn");
+    const csvBtn = document.getElementById("csvBtn");
+    const txtBtn = document.getElementById("txtBtn");
+    const clearMarksBtn = document.getElementById("clearMarksBtn");
+
+    const sessionTitleInput = document.getElementById("sessionTitle");
+    const lapModeCheckbox = document.getElementById("lapMode");
+    const askLabelCheckbox = document.getElementById("askLabel");
+    const savedStatus = document.getElementById("savedStatus");
+
+    /***********************
+     * APP STATE           *
+     ***********************/
+    let running = false;
+    let startPerf = 0;      // performance.now() at last start/resume
+    let elapsedMs = 0;      // accumulated time when paused
+    let rafId = null;
+
+    // marks: { n, ms, lapMs, label, iso }
+    let marks = [];
+
+    // lastMarkMs used for lap calculations
+    let lastMarkMs = 0;
+
+    // UI preferences + session title
+    let sessionTitle = "";
+    let lapMode = false;
+    let askLabel = true;
+
+    /***********************
+     * UTILITIES           *
+     ***********************/
+    function pad(n, width = 2) {
+      return String(n).padStart(width, "0");
+    }
+
+    function formatMs(ms) {
+      const total = Math.max(0, Math.floor(ms));
+      const minutes = Math.floor(total / 60000);
+      const seconds = Math.floor((total % 60000) / 1000);
+      const millis = total % 1000;
+      return `${pad(minutes)}:${pad(seconds)}.${pad(millis, 3)}`;
+    }
+
+    function currentElapsed() {
+      if (!running) return elapsedMs;
+      return elapsedMs + (performance.now() - startPerf);
+    }
+
+    function isoDateYYYYMMDD(d = new Date()) {
+      const y = d.getFullYear();
+      const m = pad(d.getMonth() + 1);
+      const day = pad(d.getDate());
+      return `${y}-${m}-${day}`;
+    }
+
+    function safeFilename(name) {
+      // Keep filenames friendly across OSes
+      return (name || "Session")
+        .trim()
+        .replace(/[\/\\?%*:|"<>]/g, "-")
+        .replace(/\s+/g, "_")
+        .slice(0, 60) || "Session";
+    }
+
+    function setSavedStatus(text) {
+      savedStatus.textContent = text;
+      // small “pulse” for feedback
+      savedStatus.style.opacity = "0.6";
+      setTimeout(() => (savedStatus.style.opacity = "1"), 120);
+    }
+
+    /***********************
+     * LOCALSTORAGE SAVE/LOAD (Upgrade #1)
+     ***********************/
+    function saveState() {
+      const payload = {
+        running: false, // we intentionally restore as "stopped" on reload
+        elapsedMs: Math.round(currentElapsed()),
+        marks,
+        lastMarkMs,
+        sessionTitle,
+        lapMode,
+        askLabel
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      setSavedStatus("Saved");
+    }
+
+    function loadState() {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+
+      try {
+        const data = JSON.parse(raw);
+
+        elapsedMs = Number(data.elapsedMs || 0);
+        marks = Array.isArray(data.marks) ? data.marks : [];
+        lastMarkMs = Number(data.lastMarkMs || 0);
+
+        sessionTitle = String(data.sessionTitle || "");
+        lapMode = Boolean(data.lapMode);
+        askLabel = data.askLabel !== false; // default true
+
+        // restore UI
+        sessionTitleInput.value = sessionTitle;
+        lapModeCheckbox.checked = lapMode;
+        askLabelCheckbox.checked = askLabel;
+
+      } catch {
+        // If corrupted, ignore
+      }
+    }
+
+    /***********************
+     * RENDER              *
+     ***********************/
+    function updateExportBox() {
+      // Human-friendly export:
+      // 1) 00:12.345 (+00:12.345) - optional label
+      const lines = marks.map(m => {
+        const elapsed = formatMs(m.ms);
+        const lapPart = (lapMode && typeof m.lapMs === "number")
+          ? ` (+${formatMs(m.lapMs)})`
+          : "";
+        const labelPart = m.label ? ` - ${m.label}` : "";
+        return `${m.n}) ${elapsed}${lapPart}${labelPart}`;
+      });
+      exportBox.value = lines.join("\n");
+    }
+
+    function renderMarks() {
+      marksList.innerHTML = "";
+      for (const m of marks) {
+        const li = document.createElement("li");
+        const elapsed = formatMs(m.ms);
+        const lapPart = (lapMode && typeof m.lapMs === "number")
+          ? ` (+${formatMs(m.lapMs)})`
+          : "";
+        const labelPart = m.label ? ` - ${m.label}` : "";
+        li.textContent = `${m.n}) ${elapsed}${lapPart}${labelPart}`;
+        marksList.appendChild(li);
+      }
+      updateExportBox();
+    }
+
+    /***********************
+     * TIMER LOOP          *
+     ***********************/
+    function tick() {
+      display.textContent = formatMs(currentElapsed());
+      rafId = requestAnimationFrame(tick);
+    }
+
+    /***********************
+     * CONTROLS            *
+     ***********************/
+    function start() {
+      if (running) return;
+      running = true;
+      startPerf = performance.now();
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      markBtn.disabled = false;
+
+      tick();
+      saveState();
+    }
+
+    function stop() {
+      if (!running) return;
+      running = false;
+      elapsedMs = currentElapsed();
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      markBtn.disabled = true;
+
+      cancelAnimationFrame(rafId);
+      rafId = null;
+
+      display.textContent = formatMs(elapsedMs);
+      saveState();
+    }
+
+    function mark() {
+      if (!running) return;
+
+      const ms = currentElapsed();
+      const nowIso = new Date().toISOString();
+
+      // Lap calculation (Upgrade #3)
+      const lapMs = ms - lastMarkMs;
+      lastMarkMs = ms;
+
+      // Optional label prompt
+      let label = "";
+      if (askLabel) {
+        label = prompt("Label for this mark? (optional)", "") || "";
+        label = label.trim();
+      }
+
+      const n = marks.length + 1;
+
+      marks.push({
+        n,
+        ms,
+        lapMs: lapMode ? lapMs : undefined,
+        label,
+        iso: nowIso
+      });
+
+      renderMarks();
+      saveState();
+    }
+
+    function resetAll() {
+      // Resets everything: timer + marks + lap reference
+      stop();
+      elapsedMs = 0;
+      marks = [];
+      lastMarkMs = 0;
+
+      renderMarks();
+      display.textContent = formatMs(0);
+
+      saveState();
+    }
+
+    function clearMarksOnly() {
+      marks = [];
+      lastMarkMs = currentElapsed(); // so next lap starts from "now"
+      renderMarks();
+      saveState();
+    }
+
+    /***********************
+     * EXPORTS             *
+     ***********************/
+    function download(filename, content, type) {
+      const blob = new Blob([content], { type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function exportBaseName() {
+      // Upgrade #2: SessionName_YYYY-MM-DD
+      const title = safeFilename(sessionTitleInput.value);
+      const date = isoDateYYYYMMDD(new Date());
+      return `${title}_${date}`;
+    }
+
+    function downloadCSV() {
+      const header = ["index", "elapsed_ms", "elapsed_formatted", "lap_ms", "lap_formatted", "label", "iso_time"].join(",") + "\n";
+      const rows = marks.map(m => {
+        const lapMsVal = (typeof m.lapMs === "number") ? Math.round(m.lapMs) : "";
+        const lapFmt = (typeof m.lapMs === "number") ? formatMs(m.lapMs) : "";
+        // Escape quotes in label for CSV
+        const label = (m.label || "").replace(/"/g, '""');
+        return [
+          m.n,
+          Math.round(m.ms),
+          formatMs(m.ms),
+          lapMsVal,
+          lapFmt,
+          `"${label}"`,
+          m.iso || ""
+        ].join(",");
+      }).join("\n");
+
+      download(`${exportBaseName()}.csv`, header + rows + "\n", "text/csv");
+    }
+
+    function downloadTXT() {
+      download(`${exportBaseName()}.txt`, exportBox.value + "\n", "text/plain");
+    }
+
+    /***********************
+     * UI EVENTS           *
+     ***********************/
+    startBtn.addEventListener("click", start);
+    stopBtn.addEventListener("click", stop);
+    markBtn.addEventListener("click", mark);
+    resetBtn.addEventListener("click", resetAll);
+    clearMarksBtn.addEventListener("click", clearMarksOnly);
+
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(exportBox.value);
+        setSavedStatus("Copied");
+      } catch {
+        setSavedStatus("Copy failed");
+      }
+    });
+
+    csvBtn.addEventListener("click", downloadCSV);
+    txtBtn.addEventListener("click", downloadTXT);
+
+    sessionTitleInput.addEventListener("input", () => {
+      sessionTitle = sessionTitleInput.value;
+      saveState();
+    });
+
+    lapModeCheckbox.addEventListener("change", () => {
+      lapMode = lapModeCheckbox.checked;
+      // Re-render so existing marks display lap fields when enabled
+      renderMarks();
+      saveState();
+    });
+
+    askLabelCheckbox.addEventListener("change", () => {
+      askLabel = askLabelCheckbox.checked;
+      saveState();
+    });
+
+    // Keyboard shortcuts
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "Space") {
+        e.preventDefault();
+        running ? stop() : start();
+      } else if (e.key.toLowerCase() === "m") {
+        mark();
+      }
+    });
+
+    /***********************
+     * INITIALIZE          *
+     ***********************/
+    loadState();
+    renderMarks();
+    display.textContent = formatMs(elapsedMs);
+
+    // Restore controls in "stopped" state after reload
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    markBtn.disabled = true;
+
+    /***********************
+     * PWA: SERVICE WORKER *
+     ***********************/
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", async () => {
+        try {
+          await navigator.serviceWorker.register("./sw.js");
+          // Optional: console.log("SW registered");
+        } catch (err) {
+          console.error("Service Worker registration failed:", err);
+        }
+      });
+    }
+  </script>
+</body>
+</html>
